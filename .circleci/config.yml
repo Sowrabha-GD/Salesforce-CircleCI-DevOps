@@ -1,0 +1,65 @@
+
+version: 2.1
+
+jobs:
+  salesforce-ci-cd:
+    docker:
+      - image: cimg/node:22.0
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install Salesforce CLI
+          command: |
+            npm install --global @salesforce/cli
+            sf --version
+
+      - run:
+          name: Authenticate Salesforce Org
+          command: |
+            if [ -z "${SFDX_AUTH_URL:-}" ]; then
+              echo "Salesforce authentication URL is missing"
+              exit 1
+            fi
+
+            printf '%s' "$SFDX_AUTH_URL" > /tmp/sfdx_auth_url.txt
+
+            sf org login sfdx-url \
+              --sfdx-url-file /tmp/sfdx_auth_url.txt \
+              --alias CircleCISandbox \
+              --set-default
+
+            rm -f /tmp/sfdx_auth_url.txt
+
+      - run:
+          name: Verify Salesforce Connection
+          command: |
+            sf org display --target-org CircleCISandbox
+
+      - run:
+          name: Validate Salesforce Deployment
+          command: |
+            sf project deploy start \
+              --source-dir force-app \
+              --target-org CircleCISandbox \
+              --dry-run \
+              --test-level RunLocalTests \
+              --wait 30
+
+      - run:
+          name: Deploy to Salesforce Sandbox
+          command: |
+            sf project deploy start \
+              --source-dir force-app \
+              --target-org CircleCISandbox \
+              --test-level RunLocalTests \
+              --wait 30
+
+workflows:
+  salesforce-deployment:
+    jobs:
+      - salesforce-ci-cd:
+          filters:
+            branches:
+              only: main
