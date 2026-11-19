@@ -2,6 +2,8 @@
 version: 2.1
 
 jobs:
+
+  # JOB 1: Deploy to Salesforce Sandbox
   salesforce-ci-cd:
     docker:
       - image: cimg/node:22.0
@@ -16,50 +18,132 @@ jobs:
             sf --version
 
       - run:
-          name: Authenticate Salesforce Org
+          name: Authenticate Sandbox
           command: |
-            if [ -z "${SFDX_AUTH_URL:-}" ]; then
-              echo "Salesforce authentication URL is missing"
-              exit 1
-            fi
-
-            printf '%s' "$SFDX_AUTH_URL" > /tmp/sfdx_auth_url.txt
+            printf '%s' "$SFDX_AUTH_URL" > /tmp/sandbox_auth.txt
 
             sf org login sfdx-url \
-              --sfdx-url-file /tmp/sfdx_auth_url.txt \
+              --sfdx-url-file /tmp/sandbox_auth.txt \
               --alias CircleCISandbox \
               --set-default
 
-            rm -f /tmp/sfdx_auth_url.txt
+            rm -f /tmp/sandbox_auth.txt
 
       - run:
-          name: Verify Salesforce Connection
-          command: |
-            sf org display --target-org CircleCISandbox
-
-      - run:
-          name: Validate Salesforce Deployment
+          name: Validate Sandbox Deployment
           command: |
             sf project deploy start \
               --source-dir force-app \
               --target-org CircleCISandbox \
               --dry-run \
               --test-level RunLocalTests \
-              --wait 30
+              --wait 60
 
       - run:
-          name: Deploy to Salesforce Sandbox
+          name: Deploy to Sandbox
           command: |
             sf project deploy start \
               --source-dir force-app \
               --target-org CircleCISandbox \
               --test-level RunLocalTests \
-              --wait 30
+              --wait 60
 
+
+  # JOB 2: Deploy to Salesforce Production
+  deploy-production:
+    docker:
+      - image: cimg/node:22.0
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install Salesforce CLI
+          command: |
+            sudo npm install --global @salesforce/cli
+            sf --version
+
+      - run:
+          name: Authenticate Production
+          command: |
+            if [ -z "${PROD_SFDX_AUTH_URL:-}" ]; then
+              echo "Production authentication URL is missing"
+              exit 1
+            fi
+
+            printf '%s' "$PROD_SFDX_AUTH_URL" > /tmp/production_auth.txt
+
+            sf org login sfdx-url \
+              --sfdx-url-file /tmp/production_auth.txt \
+              --alias CircleCIProduction \
+              --set-default
+
+            rm -f /tmp/production_auth.txt
+
+      - run:
+          name: Verify Production Connection
+          command: |
+            sf org display --target-org CircleCIProduction
+
+      - run:
+          name: Validate Production Deployment
+          command: |
+            sf project deploy validate \
+              --source-dir force-app \
+              --target-org CircleCIProduction \
+              --test-level RunLocalTests \
+              --wait 60 \
+              --json > /tmp/deploy-validation.json
+
+            cat /tmp/deploy-validation.json
+
+            JOB_ID=$(jq -r '.result.id' /tmp/deploy-validation.json)
+
+            if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+              echo "Production validation failed or no deployment ID returned"
+              exit 1
+            fi
+
+            echo "Production validation successful. Deployment ID: $JOB_ID"
+
+            echo "$JOB_ID" > /tmp/production-deployment-id.txt
+
+      - run:
+          name: Quick Deploy to Production
+          command: |
+            JOB_ID=$(cat /tmp/production-deployment-id.txt)
+
+            sf project deploy quick \
+              --job-id "$JOB_ID" \
+              --target-org CircleCIProduction \
+              --wait 60
+
+
+# WORKFLOW
 workflows:
-  salesforce-deployment:
+
+  salesforce-release-pipeline:
     jobs:
+
+      # First deploy to Sandbox
       - salesforce-ci-cd:
+          filters:
+            branches:
+              only: main
+
+      # Wait for manual approval
+      - approve-production:
+          type: approval
+          requires:
+            - salesforce-ci-cd
+          filters:
+            branches:
+              only: main
+
+      # Deploy to Production after approval
+      - deploy-production:
+          requires:
+            - approve-production
           filters:
             branches:
               only: main
